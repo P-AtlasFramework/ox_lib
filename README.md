@@ -1,0 +1,30 @@
+# ox_lib
+
+A FiveM library and resource implementing reusable modules, methods, and UI elements.
+
+![](https://img.shields.io/github/downloads/overextended/ox_lib/total?logo=github)
+![](https://img.shields.io/github/downloads/overextended/ox_lib/latest/total?logo=github)
+![](https://img.shields.io/github/contributors/overextended/ox_lib?logo=github)
+![](https://img.shields.io/github/v/release/overextended/ox_lib?logo=github)
+
+For guidelines to contributing to the project, and to see our Contributor License Agreement, see [CONTRIBUTING.md](./CONTRIBUTING.md)
+
+For additional legal notices, refer to [NOTICE.md](./NOTICE.md).
+
+
+## 📚 Documentation
+
+https://overextended.dev/ox_lib
+
+## 💾 Download
+
+https://github.com/overextended/ox_lib/releases/latest/download/ox_lib.zip
+
+## 📦 npm package
+
+https://www.npmjs.com/package/@overextended/ox_lib
+
+## 🖥️ Lua Language Server
+
+- Install [Lua Language Server](https://luals.github.io/#install) to ease development with annotations, type checking, diagnostics, and more.
+- Download [fivem-lls-addon](https://github.com/overextended/fivem-lls-addon) to add support for native declarations and other platform-specific functionality.

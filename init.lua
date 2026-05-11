@@ -1,121 +1,299 @@
--- @ox_lib/init.lua — drop-in shim for ox_lib's `lib` global.
---
--- Resources that ship with ox_lib expect to do:
---     shared_script '@ox_lib/init.lua'
--- and then reference `lib.notify`, `lib.callback`, etc. We supply the
--- same surface, routing each call to atlas_core's equivalent.
---
--- This file runs as a SHARED script so it's available on both sides.
--- Per-side helpers (CreateThread, RegisterCommand, etc.) live in
--- client.lua / server.lua and overlay onto the same `lib` table.
---
--- Coverage status:
---   ✅ notify, callback, alertDialog, inputDialog, registerContext,
---      showContext, hideContext, progressBar, progressCircle,
---      requestModel, requestAnimDict, requestAnimSet, getClosestPed,
---      getClosestVehicle, getClosestPlayer, getClosestObject,
---      raycast (lib.raycast.fromCamera / cam), waitFor, addCommand
---   ⚠️  Stubs (no-op + warn): cron, dui, scaleform, marker, points,
---      logger, locale, zones, grid
---
--- Add a new wrap by appending here. The console will print
--- `[ox_lib shim] not implemented: <name>` for any caller hitting a
--- stub, so missing surface is loud rather than silent.
+---@meta
+--[[
+    https://github.com/overextended/ox_lib
 
--- `lib` is the canonical global ox_lib consumers reference — must NOT
--- be local. lua-language-server's lowercase-global warning is wrong
--- here; suppressed deliberately.
----@diagnostic disable-next-line: lowercase-global
-lib = lib or {}
+    This file is licensed under LGPL-3.0 or higher <https://www.gnu.org/licenses/lgpl-3.0.en.html>
 
-local function unimplemented(name)
-    -- Stub returns a function that silently swallows whatever args the
-    -- caller passes (Lua discards extras automatically) and prints once.
-    return function()
-        print(('^3[ox_lib shim] not implemented: %s — call ignored^7'):format(name))
-        return nil
-    end
+    Copyright © 2025 Linden <https://github.com/thelindat>
+]]
+
+if not _VERSION:find('5.4') then
+    error('Lua 5.4 must be enabled in the resource manifest!', 2)
 end
 
--- ── Notify ──────────────────────────────────────────────────────────
--- ox_lib's lib.notify(opts) → opts: { title, description, type, position,
--- duration, icon, iconColor, ... }
--- atlas_core's :Notify accepts the same options-table form.
--- Duplicate-set-field is the LLS recognizing the real ox_lib's signature
--- in workspace types — we're shadowing on purpose.
----@diagnostic disable-next-line: duplicate-set-field
-function lib.notify(opts)
-    if type(opts) ~= 'table' then opts = { description = tostring(opts) } end
-    -- atlas_core Notify expects text or table; map ox shape verbatim.
-    local payload = {
-        text     = opts.description or opts.title or '',
-        title    = opts.title,
-        type     = opts.type or 'primary',
-        duration = opts.duration or 5000,
-        icon     = opts.icon,
-        iconColor = opts.iconColor,
-        position = opts.position,
-    }
-    if IsDuplicityVersion() then
-        -- Server-side notify — atlas_core convention is a TriggerClientEvent.
-        local src = opts.source
-        if src then
-            TriggerClientEvent('atlas_core:notify', src, payload)
+local resourceName = GetCurrentResourceName()
+local ox_lib = 'ox_lib'
+
+-- Some people have decided to load this file as part of ox_lib's fxmanifest?
+if resourceName == ox_lib then return end
+
+if lib and lib.name == ox_lib then
+    error(("Cannot load ox_lib more than once.\n\tRemove any duplicate entries from '@%s/fxmanifest.lua'"):format(resourceName))
+end
+
+local export = exports[ox_lib]
+
+if GetResourceState(ox_lib) ~= 'started' then
+    error('^1ox_lib must be started before this resource.^0', 0)
+end
+
+local status = export.hasLoaded()
+
+if status ~= true then error(status, 2) end
+
+-- Ignore invalid types during msgpack.pack (e.g. userdata)
+msgpack.setoption('ignore_invalid', true)
+
+-----------------------------------------------------------------------------------------------
+-- Module
+-----------------------------------------------------------------------------------------------
+
+local LoadResourceFile = LoadResourceFile
+local context = IsDuplicityVersion() and 'server' or 'client'
+
+function noop() end
+
+local function loadModule(self, module)
+    local dir = ('imports/%s'):format(module)
+    local chunk = LoadResourceFile(ox_lib, ('%s/%s.lua'):format(dir, context))
+    local shared = LoadResourceFile(ox_lib, ('%s/shared.lua'):format(dir))
+
+    if shared then
+        chunk = (chunk and ('%s\n%s'):format(shared, chunk)) or shared
+    end
+
+    if chunk then
+        local fn, err = load(chunk, ('@@ox_lib/imports/%s/%s.lua'):format(module, context))
+
+        if not fn or err then
+            if shared then
+                lib.print.warn(("An error occurred when importing '@ox_lib/imports/%s'.\nThis is likely caused by improperly updating ox_lib.\n%s'")
+                    :format(module, err))
+                fn, err = load(shared, ('@@ox_lib/imports/%s/shared.lua'):format(module))
+            end
+
+            if not fn or err then
+                return error(('\n^1Error importing module (%s): %s^0'):format(dir, err), 3)
+            end
         end
-    else
-        exports['atlas_core']:Notify(payload, payload.type, payload.duration, payload.icon)
+
+        local result = fn()
+        self[module] = result or noop
+        return self[module]
     end
 end
 
--- ── Asset loaders ───────────────────────────────────────────────────
-if not IsDuplicityVersion() then
-    function lib.requestModel(model, timeoutMs)
-        return exports['atlas_core']:RequestModel(model, timeoutMs or 30000)
+-----------------------------------------------------------------------------------------------
+-- API
+-----------------------------------------------------------------------------------------------
+
+local function call(self, index, ...)
+    local module = rawget(self, index)
+
+    if not module then
+        self[index] = noop
+        module = loadModule(self, index)
+
+        if not module then
+            local function method(...)
+                return export[index](nil, ...)
+            end
+
+            if not ... then
+                self[index] = method
+            end
+
+            return method
+        end
     end
-    function lib.requestAnimDict(dict, timeoutMs)
-        return exports['atlas_core']:RequestAnimDict(dict, timeoutMs or 30000)
-    end
-    function lib.requestAnimSet(set, timeoutMs)
-        return exports['atlas_core']:RequestAnimSet(set, timeoutMs or 30000)
-    end
-    function lib.requestWeaponAsset(hash, timeoutMs)
-        return exports['atlas_core']:RequestWeaponAsset(hash, timeoutMs or 30000)
-    end
-    function lib.requestScaleformMovie(name, timeoutMs)
-        return exports['atlas_core']:RequestScaleformMovie(name, timeoutMs or 30000)
-    end
+
+    return module
 end
 
--- ── Stubs (warn-on-use) ─────────────────────────────────────────────
--- These are surfaced for compatibility but call into nothing. Add an
--- implementation here when a consumer needs them.
-lib.cron        = setmetatable({}, { __index = function(_, k) return unimplemented('cron.' .. k) end })
-lib.logger      = unimplemented('logger')
-lib.locale      = unimplemented('locale')
-lib.scaleform   = setmetatable({}, { __index = function(_, k) return unimplemented('scaleform.' .. k) end })
-lib.marker      = setmetatable({}, { __index = function(_, k) return unimplemented('marker.' .. k) end })
-lib.points      = setmetatable({}, { __index = function(_, k) return unimplemented('points.' .. k) end })
-lib.zones       = setmetatable({}, { __index = function(_, k) return unimplemented('zones.' .. k) end })
-lib.grid        = setmetatable({}, { __index = function(_, k) return unimplemented('grid.' .. k) end })
+local lib = setmetatable({
+    name = ox_lib,
+    context = context,
+}, {
+    __index = call,
+    __call = call,
+})
 
--- A handful of resources rely on lib.print existing. Forward to plain
--- print so the resource doesn't crash; level prefixes get inlined.
-lib.print = setmetatable({}, {
-    __index = function(_, level)
-        return function(...) print(('[%s]'):format(level:upper()), ...) end
+local intervals = {}
+--- Dream of a world where this PR gets accepted.
+---@param callback function | number
+---@param interval? number
+---@param ... any
+function SetInterval(callback, interval, ...)
+    interval = interval or 0
+
+    if type(interval) ~= 'number' then
+        return error(('Interval must be a number. Received %s'):format(json.encode(interval --[[@as unknown]])))
+    end
+
+    local cbType = type(callback)
+
+    if cbType == 'number' and intervals[callback] then
+        intervals[callback] = interval or 0
+        return
+    end
+
+    if cbType ~= 'function' then
+        return error(('Callback must be a function. Received %s'):format(cbType))
+    end
+
+    local args, id = { ... }
+
+    Citizen.CreateThreadNow(function(ref)
+        id = ref
+        intervals[id] = interval or 0
+        repeat
+            interval = intervals[id]
+            Wait(interval)
+
+            if interval < 0 then break end
+            callback(table.unpack(args))
+        until false
+        intervals[id] = nil
+    end)
+
+    return id
+end
+
+---@param id number
+function ClearInterval(id)
+    if type(id) ~= 'number' then
+        return error(('Interval id must be a number. Received %s'):format(json.encode(id --[[@as unknown]])))
+    end
+
+    if not intervals[id] then
+        return error(('No interval exists with id %s'):format(id))
+    end
+
+    intervals[id] = -1
+end
+
+--[[
+    lua language server doesn't support generics when using @overload
+    see https://github.com/LuaLS/lua-language-server/issues/723
+    this function stub allows the following to work
+
+    local key = cache('key', function() return 'abc' end) -- fff: 'abc'
+    local game = cache.game -- game: string
+]]
+
+---@generic T
+---@param key string
+---@param func fun(...: any): T
+---@param timeout? number
+---@return T
+---Caches the result of a function, optionally clearing it after timeout ms.
+function cache(key, func, timeout) end
+
+local cacheEvents = {}
+
+local cache = setmetatable({ game = GetGameName(), resource = resourceName }, {
+    __index = function(self, key)
+        cacheEvents[key] = {}
+
+        AddEventHandler(('ox_lib:cache:%s'):format(key), function(value)
+            local oldValue = self[key]
+            local events = cacheEvents[key]
+
+            for i = 1, #events do
+                Citizen.CreateThreadNow(function()
+                    events[i](value, oldValue)
+                end)
+            end
+
+            self[key] = value
+        end)
+
+        return rawset(self, key, export.cache(nil, key) or false)[key]
+    end,
+
+    __call = function(self, key, func, timeout)
+        local value = rawget(self, key)
+
+        if value == nil then
+            value = func()
+
+            rawset(self, key, value)
+
+            if timeout then SetTimeout(timeout, function() self[key] = nil end) end
+        end
+
+        return value
     end,
 })
 
--- waitFor — block (in a CreateThread) until cb returns non-nil or
--- timeoutMs elapses. ox_lib's exact semantics.
-function lib.waitFor(cb, errMsg, timeoutMs)
-    local start = GetGameTimer()
-    while true do
-        local result = cb()
-        if result then return result end
-        if timeoutMs and (GetGameTimer() - start) >= timeoutMs then
-            return nil, errMsg or 'lib.waitFor timed out'
+function lib.onCache(key, cb)
+    if not cacheEvents[key] then
+        getmetatable(cache).__index(cache, key)
+    end
+
+    table.insert(cacheEvents[key], cb)
+end
+
+_ENV.lib = lib
+_ENV.cache = cache
+_ENV.require = lib.require
+
+local notifyEvent = ('__ox_notify_%s'):format(cache.resource)
+
+if context == 'client' then
+    RegisterNetEvent(notifyEvent, function(data)
+        if locale then
+            if data.title then
+                data.title = locale(data.title) or data.title
+            end
+
+            if data.description then
+                data.description = locale(data.description) or data.description
+            end
         end
-        Wait(0)
+
+        return export:notify(data)
+    end)
+
+    cache.playerId = PlayerId()
+    cache.serverId = GetPlayerServerId(cache.playerId)
+else
+    ---`server`\
+    ---Trigger a notification on the target playerId from the server.\
+    ---If locales are loaded, the title and description will be formatted automatically.\
+    ---Note: No support for locale placeholders when using this function.
+    ---@param playerId number
+    ---@param data NotifyProps
+    ---@deprecated
+    ---@diagnostic disable-next-line: duplicate-set-field
+    function lib.notify(playerId, data)
+        TriggerClientEvent(notifyEvent, playerId, data)
+    end
+
+    local poolNatives = {
+        CPed = GetAllPeds,
+        CObject = GetAllObjects,
+        CVehicle = GetAllVehicles,
+    }
+
+    ---@param poolName 'CPed' | 'CObject' | 'CVehicle'
+    ---@return number[]
+    ---Server-side parity for the `GetGamePool` client native.
+    function GetGamePool(poolName)
+        local fn = poolNatives[poolName]
+        return fn and fn() --[[@as number[] ]]
+    end
+
+    ---@return number[]
+    ---Server-side parity for the `GetPlayers` client native.
+    function GetActivePlayers()
+        local playerNum = GetNumPlayerIndices()
+        local players = table.create(playerNum, 0)
+
+        for i = 1, playerNum do
+            players[i] = tonumber(GetPlayerFromIndex(i - 1))
+        end
+
+        return players
+    end
+end
+
+for i = 1, GetNumResourceMetadata(cache.resource, 'ox_lib') do
+    local name = GetResourceMetadata(cache.resource, 'ox_lib', i - 1)
+
+    if not rawget(lib, name) then
+        local module = loadModule(lib, name)
+
+        if type(module) == 'function' then pcall(module) end
     end
 end
